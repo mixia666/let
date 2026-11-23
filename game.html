@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PULSE SERPENT — a one-prompt browser game</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: radial-gradient(1200px 800px at 50% 30%, #1b0f2e 0%, #0b0714 55%, #060310 100%);
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+    color: #f5eefc;
+    overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #wrap { position: relative; width: 1920px; height: 1080px; flex: none; }
+  canvas { position: absolute; inset: 0; display: block; }
+  .hud { position: absolute; pointer-events: none; }
+  #title { top: 44px; left: 64px; }
+  #title h1 {
+    font-size: 54px; font-weight: 900; letter-spacing: 6px;
+    background: linear-gradient(90deg, #ff4fd8, #a06bff 55%, #37e0ff);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    text-shadow: 0 0 42px rgba(255, 79, 216, .25);
+  }
+  #title p { margin-top: 8px; font-size: 21px; color: #b9a8d9; letter-spacing: 2px; }
+  #stats { top: 44px; right: 64px; text-align: right; }
+  #stats .row { margin-bottom: 10px; }
+  #stats .k { font-size: 17px; letter-spacing: 3px; color: #9d8bc7; }
+  #stats .v { font-size: 44px; font-weight: 800; line-height: 1; color: #fff; }
+  #stats .v.pink { color: #ff4fd8; }
+  #hint { left: 64px; bottom: 40px; font-size: 19px; color: #8d7bb5; letter-spacing: 1px; }
+  #badge {
+    right: 64px; bottom: 34px; padding: 10px 18px; border: 1px solid rgba(255,79,216,.55);
+    border-radius: 999px; font-size: 18px; letter-spacing: 1px; color: #ffd7f6;
+    background: rgba(255, 79, 216, .08);
+  }
+  #overlay {
+    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(6, 3, 16, .55); backdrop-filter: blur(2px);
+  }
+  #overlay .card {
+    text-align: center; padding: 44px 72px; border-radius: 24px;
+    border: 1px solid rgba(160, 107, 255, .5); background: rgba(16, 8, 32, .88);
+    box-shadow: 0 0 80px rgba(160, 107, 255, .35);
+  }
+  #overlay h2 { font-size: 56px; letter-spacing: 6px; color: #ff4fd8; margin-bottom: 12px; }
+  #overlay p { font-size: 22px; color: #d9ccf5; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="1920" height="1080"></canvas>
+  <div class="hud" id="title">
+    <h1>PULSE SERPENT</h1>
+    <p>ONE PROMPT &rarr; ONE GAME</p>
+  </div>
+  <div class="hud" id="stats">
+    <div class="row"><div class="k">SCORE</div><div class="v pink" id="score">0</div></div>
+    <div class="row"><div class="k">BEST</div><div class="v" id="best">0</div></div>
+    <div class="row"><div class="k">LENGTH</div><div class="v" id="len">5</div></div>
+  </div>
+  <div class="hud" id="hint">&#8592; &#8593; &#8595; &#8594; / WASD to steer &middot; SPACE to pause &middot; autopilot until you touch a key</div>
+  <div class="hud" id="badge">BUILT BY AN AI AGENT &middot; ONE PROMPT</div>
+  <div id="overlay"><div class="card"><h2>GAME OVER</h2><p id="final">Score 0</p><p>Press R to play again</p></div></div>
+</div>
+<script>
+"use strict";
+/* PULSE SERPENT — a neon snake game in one file.
+   Written by an AI coding agent from a single prompt.
+   Playable with the keyboard; an autopilot plays it for you until you steer. */
+
+// ---------- deterministic RNG (seeded, so demo runs are reproducible) ----
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const params = new URLSearchParams(location.search);
+const rng = mulberry32(parseInt(params.get("seed") || "7", 10));
+
+// ---------- board geometry -------------------------------------------------
+const COLS = 25, ROWS = 25, CELL = 40;
+const FIELD = COLS * CELL;                       // 1000 x 1000 play field
+const FX = (1920 - FIELD) / 2, FY = (1080 - FIELD) / 2;
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+// ---------- game state -------------------------------------------------------
+const DIRS = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] };
+let snake, prevSnake, dir, pendingDir, food, particles, score, best, alive;
+let tickMs, acc, lastTime, autopilot, paused, overAt;
+
+best = parseInt(localStorage.getItem("pulse-serpent-best") || "0", 10) || 0;
+
+function reset() {
+  const cy = ROWS >> 1, cx = COLS >> 1;
+  snake = [];
+  for (let i = 0; i < 5; i++) snake.push([cx - i, cy]);
+  prevSnake = snake.map(s => s.slice());
+  dir = DIRS.right; pendingDir = DIRS.right;
+  score = 0; alive = true; paused = false; overAt = 0;
+  tickMs = 115; acc = 0; particles = [];
+  placeFood();
+  document.getElementById("overlay").style.display = "none";
+  syncHud();
+}
+function placeFood() {
+  const taken = new Set(snake.map(s => s[0] + "," + s[1]));
+  let x, y;
+  do { x = (rng() * COLS) | 0; y = (rng() * ROWS) | 0; } while (taken.has(x + "," + y));
+  food = [x, y];
+}
+function syncHud() {
+  document.getElementById("score").textContent = score;
+  document.getElementById("best").textContent = best;
+  document.getElementById("len").textContent = snake.length;
+}
+
+// ---------- autopilot: BFS to the food when safe, else maximise open room --
+function bfsPath(start, goal, blocked) {
+  const key = (x, y) => x + "," + y;
+  const seen = new Set([key(start[0], start[1])]);
+  const q = [[start[0], start[1], null]];
+  while (q.length) {
+    const [x, y, first] = q.shift();
+    if (x === goal[0] && y === goal[1]) return first;
+    for (const d of Object.values(DIRS)) {
+      const nx = x + d[0], ny = y + d[1], k = key(nx, ny);
+      if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+      if (seen.has(k) || blocked.has(k)) continue;
+      seen.add(k);
+      q.push([nx, ny, first || d]);
+    }
+  }
+  return null;
+}
+function floodArea(start, blocked) {
+  const key = (x, y) => x + "," + y;
+  const seen = new Set([key(start[0], start[1])]);
+  const stack = [start];
+  while (stack.length) {
+    const [x, y] = stack.pop();
+    for (const d of Object.values(DIRS)) {
+      const nx = x + d[0], ny = y + d[1], k = key(nx, ny);
+      if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+      if (seen.has(k) || blocked.has(k)) continue;
+      seen.add(k); stack.push([nx, ny]);
+    }
+  }
+  return seen.size;
+}
+function autopilotMove() {
+  const head = snake[0];
+  const bodySet = new Set(snake.slice(0, -1).map(s => s[0] + "," + s[1])); // tail tip moves away
+  const first = bfsPath(head, food, bodySet);
+  if (first) {
+    // safety: after stepping toward the food, the head must still reach the tail
+    const nx = head[0] + first[0], ny = head[1] + first[1];
+    const after = new Set(snake.slice(0, -2).map(s => s[0] + "," + s[1]));
+    if (bfsPath([nx, ny], snake[snake.length - 1], after) || floodArea([nx, ny], after) > snake.length) {
+      return first;
+    }
+  }
+  let bestMove = null, bestArea = -1;
+  for (const d of Object.values(DIRS)) {
+    if (d[0] === -dir[0] && d[1] === -dir[1]) continue;
+    const nx = head[0] + d[0], ny = head[1] + d[1];
+    if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) continue;
+    if (bodySet.has(nx + "," + ny)) continue;
+    const area = floodArea([nx, ny], bodySet);
+    if (area > bestArea) { bestArea = area; bestMove = d; }
+  }
+  return bestMove || dir;
+}
+
+// ---------- simulation -------------------------------------------------------
+function step() {
+  prevSnake = snake.map(s => s.slice());
+  if (autopilot) pendingDir = autopilotMove();
+  dir = pendingDir;
+  const head = [snake[0][0] + dir[0], snake[0][1] + dir[1]];
+  const hitsWall = head[0] < 0 || head[1] < 0 || head[0] >= COLS || head[1] >= ROWS;
+  const hitsSelf = snake.slice(0, -1).some(s => s[0] === head[0] && s[1] === head[1]);
+  if (hitsWall || hitsSelf) {
+    alive = false; overAt = performance.now();
+    if (score > best) { best = score; localStorage.setItem("pulse-serpent-best", String(best)); }
+    document.getElementById("final").textContent = "Score " + score + " · Length " + snake.length;
+    document.getElementById("overlay").style.display = "flex";
+    syncHud();
+    return;
+  }
+  snake.unshift(head);
+  if (head[0] === food[0] && head[1] === food[1]) {
+    score += 10;
+    burst(food[0], food[1]);
+    placeFood();
+    tickMs = Math.max(68, tickMs - 2);
+  } else {
+    snake.pop();
+  }
+  syncHud();
+}
+function burst(cx, cy) {
+  for (let i = 0; i < 22; i++) {
+    const a = rng() * Math.PI * 2, sp = 0.06 + rng() * 0.22;
+    particles.push({
+      x: FX + (cx + 0.5) * CELL, y: FY + (cy + 0.5) * CELL,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 1
+    });
+  }
+}
+
+// ---------- rendering ----------------------------------------------------------
+function draw(t) {
+  ctx.clearRect(0, 0, 1920, 1080);
+  // play field
+  ctx.fillStyle = "#120826";
+  ctx.fillRect(FX, FY, FIELD, FIELD);
+  ctx.strokeStyle = "rgba(160,107,255,0.10)";
+  ctx.lineWidth = 1;
+  for (let i = 1; i < COLS; i++) {
+    ctx.beginPath(); ctx.moveTo(FX + i * CELL, FY); ctx.lineTo(FX + i * CELL, FY + FIELD); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(FX, FY + i * CELL); ctx.lineTo(FX + FIELD, FY + i * CELL); ctx.stroke();
+  }
+  ctx.strokeStyle = "rgba(255,79,216,0.65)";
+  ctx.lineWidth = 3;
+  ctx.shadowColor = "#ff4fd8"; ctx.shadowBlur = 18;
+  ctx.strokeRect(FX, FY, FIELD, FIELD);
+  ctx.shadowBlur = 0;
+
+  // food: a pulsing orb
+  const pulse = 1 + Math.sin(t / 180) * 0.12;
+  const fx = FX + (food[0] + 0.5) * CELL, fy = FY + (food[1] + 0.5) * CELL;
+  ctx.fillStyle = "#ffd166";
+  ctx.shadowColor = "#ffd166"; ctx.shadowBlur = 26;
+  ctx.beginPath(); ctx.arc(fx, fy, 13 * pulse, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // snake: interpolated between ticks, head bright, tail fading violet
+  const k = Math.min(1, acc / tickMs);
+  for (let i = snake.length - 1; i >= 0; i--) {
+    const cur = snake[i], prev = prevSnake[Math.min(i, prevSnake.length - 1)];
+    const gx = prev[0] + (cur[0] - prev[0]) * k, gy = prev[1] + (cur[1] - prev[1]) * k;
+    const x = FX + gx * CELL, y = FY + gy * CELL;
+    const f = i / Math.max(1, snake.length - 1);
+    const r = Math.round(255 - 95 * f), g = Math.round(79 + 28 * f), b = Math.round(216 + 39 * f);
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.shadowColor = "#ff4fd8"; ctx.shadowBlur = i === 0 ? 24 : 12;
+    const inset = i === 0 ? 3 : 4;
+    ctx.beginPath();
+    ctx.roundRect(x + inset, y + inset, CELL - inset * 2, CELL - inset * 2, 10);
+    ctx.fill();
+  }
+  ctx.shadowBlur = 0;
+  // eyes on the head
+  const h = snake[0], ph = prevSnake[0];
+  const hx = FX + (ph[0] + (h[0] - ph[0]) * k + 0.5) * CELL;
+  const hy = FY + (ph[1] + (h[1] - ph[1]) * k + 0.5) * CELL;
+  ctx.fillStyle = "#1b0f2e";
+  const sideX = dir[1] !== 0 ? 9 : 0, sideY = dir[0] !== 0 ? 9 : 0;
+  const fwdX = dir[0] * 6, fwdY = dir[1] * 6;
+  ctx.beginPath(); ctx.arc(hx - sideX + fwdX, hy - sideY + fwdY, 3.4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(hx + sideX + fwdX, hy + sideY + fwdY, 3.4, 0, Math.PI * 2); ctx.fill();
+
+  // particles
+  particles = particles.filter(p => p.life > 0);
+  for (const p of particles) {
+    p.x += p.vx * 16; p.y += p.vy * 16; p.life -= 0.03;
+    ctx.fillStyle = `rgba(255, 209, 102, ${Math.max(0, p.life)})`;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 4 * p.life + 1, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// ---------- main loop ---------------------------------------------------------
+function frame(now) {
+  const dt = Math.min(100, now - lastTime);
+  lastTime = now;
+  if (alive && !paused) {
+    acc += dt;
+    while (acc >= tickMs && alive) { acc -= tickMs; step(); }
+  }
+  if (!alive && autopilot && now - overAt > 1400) reset();
+  draw(now);
+  requestAnimationFrame(frame);
+}
+
+// ---------- input ---------------------------------------------------------------
+const KEYMAP = { ArrowUp: DIRS.up, KeyW: DIRS.up, ArrowDown: DIRS.down, KeyS: DIRS.down,
+                 ArrowLeft: DIRS.left, KeyA: DIRS.left, ArrowRight: DIRS.right, KeyD: DIRS.right };
+addEventListener("keydown", e => {
+  if (e.code === "Space") { paused = !paused; e.preventDefault(); return; }
+  if (e.code === "KeyR" && !alive) { reset(); return; }
+  const d = KEYMAP[e.code];
+  if (d && (d[0] !== -dir[0] || d[1] !== -dir[1])) { pendingDir = d; autopilot = false; }
+});
+let touchStart = null;
+addEventListener("touchstart", e => { touchStart = [e.touches[0].clientX, e.touches[0].clientY]; }, { passive: true });
+addEventListener("touchend", e => {
+  if (!touchStart) return;
+  const dx = e.changedTouches[0].clientX - touchStart[0];
+  const dy = e.changedTouches[0].clientY - touchStart[1];
+  const d = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? DIRS.right : DIRS.left) : (dy > 0 ? DIRS.down : DIRS.up);
+  if (d[0] !== -dir[0] || d[1] !== -dir[1]) { pendingDir = d; autopilot = false; }
+  touchStart = null;
+}, { passive: true });
+
+// ---------- go ---------------------------------------------------------------------
+autopilot = params.get("manual") !== "1";
+reset();
+lastTime = performance.now();
+requestAnimationFrame(frame);
+window.__PULSE__ = { get score() { return score; }, get length() { return snake.length; }, get alive() { return alive; } };
+</script>
+</body>
+</html>
